@@ -1,0 +1,50 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-x64:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up MSYS2 (UCRT64)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: false
+          install: mingw-w64-ucrt-x86_64-gcc
+
+      - name: Build
+        shell: msys2 {0}
+        run: |
+          set -e
+          mkdir -p build
+          windres -I src -I resources resources/app.rc -O coff -o build/app.res
+          gcc -c src/manifest_stub.c -o build/default-manifest.o
+          gcc -std=c11 -Os -s -mwindows -Wall -Wextra \
+            -DUNICODE -D_UNICODE -DWIN32_LEAN_AND_MEAN -DNOMINMAX \
+            -ffunction-sections -fdata-sections -B build \
+            src/main.c src/config.c src/audio.c src/notify.c \
+            src/settings.c src/util.c build/app.res \
+            -o build/BetterCtrlCS.exe \
+            -Wl,--gc-sections -static-libgcc \
+            -luser32 -lgdi32 -lshell32 -ladvapi32 \
+            -lcomctl32 -lcomdlg32 -lwinmm
+          sha256sum build/BetterCtrlCS.exe
+          ls -l build/BetterCtrlCS.exe
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BetterCtrlCS-windows-x64
+          path: build/BetterCtrlCS.exe
+          if-no-files-found: error
