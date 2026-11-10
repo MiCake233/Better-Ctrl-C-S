@@ -4,13 +4,19 @@
 
 #include "app.h"
 
+/* Long enough for the longest path SHGetFolderPathW can return (MAX_PATH-1)
+   plus the directory name and the longest file we store under it. */
+#define APP_PATH_CCH 512
+
 extern wchar_t g_exePath[MAX_PATH];
-extern wchar_t g_dataDir[MAX_PATH];
-extern wchar_t g_iniPath[MAX_PATH];
-extern wchar_t g_customWavPath[MAX_PATH];
-extern wchar_t g_logPath[MAX_PATH];
+extern wchar_t g_dataDir[APP_PATH_CCH];
+extern wchar_t g_iniPath[APP_PATH_CCH];
+extern wchar_t g_customWavPath[APP_PATH_CCH];
+extern wchar_t g_logPath[APP_PATH_CCH];
 
 BOOL UtilInitPaths(void);
+BOOL UtilJoinPath(wchar_t* dst, int dstCch, const wchar_t* dir,
+                  const wchar_t* name);
 BOOL UtilEnsureDir(const wchar_t* dir);
 BOOL UtilFileExists(const wchar_t* path);
 BOOL UtilReadFile(const wchar_t* path, DWORD maxBytes, BYTE** data, DWORD* size);
