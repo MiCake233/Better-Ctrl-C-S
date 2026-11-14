@@ -235,12 +235,39 @@ static void ReadControls(void)
     g_startup = IsDlgButtonChecked(g_win, IDC_STARTUP) == BST_CHECKED;
 }
 
+static BOOL StartupMatches(BOOL enable)
+{
+    if (enable)
+        return UtilAutostartIsCurrent();
+    return !UtilAutostartEnabled();
+}
+
+static void DeleteTemp(const wchar_t* path)
+{
+    if (path && path[0])
+        DeleteFileW(path);
+}
+
 static void Commit(void)
 {
+    BOOL writeCustom;
+    BOOL autoChanged = FALSE;
+    BOOL previousStartup;
+    wchar_t tempPath[APP_PATH_CCH];
+
+    tempPath[0] = 0;
     ReadControls();
 
-    if (g_draft.custom_sound && g_pickDirty) {
-        if (!g_pickValid || !AudioSaveWav(&g_pick, g_customWavPath)) {
+    writeCustom = g_draft.custom_sound && g_pickDirty;
+    previousStartup = UtilAutostartEnabled();
+
+    /* Write the new sound aside first so a later failure does not replace
+       the live file or leave autostart and config disagreeing. */
+    if (writeCustom) {
+        if (!g_pickValid ||
+            !UtilJoinPath(tempPath, APP_PATH_CCH, g_dataDir, L"custom.new") ||
+            !AudioSaveWav(&g_pick, tempPath)) {
+            DeleteTemp(tempPath);
             MessageBoxW(g_win,
                         L"Could not write the custom sound file.",
                         L"Better Ctrl+C/S", MB_ICONERROR);
@@ -248,16 +275,38 @@ static void Commit(void)
         }
     }
 
-    if (!UtilAutostartSet(g_startup)) {
-        MessageBoxW(g_win,
-                    L"Could not update the Windows startup entry. "
-                    L"Check your permissions and try again.",
+    if (!StartupMatches(g_startup)) {
+        if (!UtilAutostartSet(g_startup)) {
+            DeleteTemp(tempPath);
+            MessageBoxW(g_win,
+                        L"Could not update the Windows startup entry. "
+                        L"Check your permissions and try again.",
+                        L"Better Ctrl+C/S", MB_ICONERROR);
+            return;
+        }
+        autoChanged = TRUE;
+    }
+
+    if (!ConfigSave(&g_draft, g_iniPath)) {
+        if (autoChanged && !UtilAutostartSet(previousStartup))
+            UtilLog(L"Commit: could not restore the startup entry");
+        DeleteTemp(tempPath);
+        MessageBoxW(g_win, L"Could not write the configuration file.",
                     L"Better Ctrl+C/S", MB_ICONERROR);
         return;
     }
 
-    if (!ConfigSave(&g_draft, g_iniPath)) {
-        MessageBoxW(g_win, L"Could not write the configuration file.",
+    if (writeCustom &&
+        !MoveFileExW(tempPath, g_customWavPath,
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        UtilLog(L"Commit: could not install custom sound (%lu)", GetLastError());
+        if (!ConfigSave(&g_config, g_iniPath))
+            UtilLog(L"Commit: could not restore configuration");
+        if (autoChanged && !UtilAutostartSet(previousStartup))
+            UtilLog(L"Commit: could not restore the startup entry");
+        DeleteTemp(tempPath);
+        MessageBoxW(g_win,
+                    L"Could not write the custom sound file.",
                     L"Better Ctrl+C/S", MB_ICONERROR);
         return;
     }

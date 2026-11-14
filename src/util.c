@@ -8,10 +8,58 @@
 #define LOG_MAX_BYTES (256u * 1024u)
 
 wchar_t g_exePath[MAX_PATH];
-wchar_t g_dataDir[MAX_PATH];
-wchar_t g_iniPath[MAX_PATH];
-wchar_t g_customWavPath[MAX_PATH];
-wchar_t g_logPath[MAX_PATH];
+wchar_t g_dataDir[APP_PATH_CCH];
+wchar_t g_iniPath[APP_PATH_CCH];
+wchar_t g_customWavPath[APP_PATH_CCH];
+wchar_t g_logPath[APP_PATH_CCH];
+
+BOOL UtilJoinPath(wchar_t* dst, int dstCch, const wchar_t* dir,
+                  const wchar_t* name)
+{
+    int nd;
+    int nn;
+
+    if (!dst || dstCch <= 0 || !dir || !name)
+        return FALSE;
+
+    nd = lstrlenW(dir);
+    nn = lstrlenW(name);
+    if (nd <= 0 || nn <= 0 || nd >= dstCch || nn >= dstCch)
+        return FALSE;
+    /* dir + '\\' + name + NUL must fit. The comparisons above keep the
+       subtraction from wrapping. */
+    if (nd > dstCch - nn - 2)
+        return FALSE;
+
+    memcpy(dst, dir, (size_t)nd * sizeof(wchar_t));
+    dst[nd] = L'\\';
+    memcpy(dst + nd + 1, name, (size_t)nn * sizeof(wchar_t));
+    dst[nd + nn + 1] = 0;
+    return TRUE;
+}
+
+/* "\"<exe>\" --background" */
+static BOOL FormatRunCommand(wchar_t* cmd, int cch)
+{
+    static const wchar_t suffix[] = L"\" --background";
+    int n;
+    int tail;
+
+    if (!cmd || cch <= 0 || !g_exePath[0])
+        return FALSE;
+
+    n = lstrlenW(g_exePath);
+    tail = lstrlenW(suffix);
+    if (n <= 0 || tail <= 0 || n >= cch || tail >= cch)
+        return FALSE;
+    if (1 + n + tail + 1 > cch)
+        return FALSE;
+
+    cmd[0] = L'"';
+    memcpy(cmd + 1, g_exePath, (size_t)n * sizeof(wchar_t));
+    memcpy(cmd + 1 + n, suffix, (size_t)(tail + 1) * sizeof(wchar_t));
+    return TRUE;
+}
 
 BOOL UtilEnsureDir(const wchar_t* dir)
 {
@@ -32,35 +80,58 @@ BOOL UtilFileExists(const wchar_t* path)
 BOOL UtilInitPaths(void)
 {
     wchar_t appdata[MAX_PATH] = L"";
+    BOOL haveExe = FALSE;
     BOOL ok = FALSE;
+    DWORD got;
+    wchar_t stale[APP_PATH_CCH];
 
-    if (GetModuleFileNameW(NULL, g_exePath, MAX_PATH) == 0)
-        return FALSE;
+    g_exePath[0] = 0;
+    g_dataDir[0] = 0;
+    g_iniPath[0] = 0;
+    g_customWavPath[0] = 0;
+    g_logPath[0] = 0;
+
+    got = GetModuleFileNameW(NULL, g_exePath, MAX_PATH);
+    if (got > 0 && got < MAX_PATH) {
+        haveExe = TRUE;
+    } else {
+        /* Truncated or missing. Never publish a partial path: autostart
+           would point at the wrong file. */
+        g_exePath[0] = 0;
+    }
 
     if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_APPDATA | CSIDL_FLAG_CREATE, NULL,
                                    SHGFP_TYPE_CURRENT, appdata))) {
-        wsprintfW(g_dataDir, L"%s\\%s", appdata, APP_ID);
-        ok = UtilEnsureDir(g_dataDir);
+        if (UtilJoinPath(g_dataDir, APP_PATH_CCH, appdata, APP_ID))
+            ok = UtilEnsureDir(g_dataDir);
     }
 
-    if (!ok) {
+    if (!ok && haveExe) {
         /* Fall back to the executable directory when %APPDATA% is unusable. */
         wchar_t* slash;
-        wcscpy(g_dataDir, g_exePath);
-        slash = wcsrchr(g_dataDir, L'\\');
-        if (slash) {
-            *slash = 0;
-        } else {
-            wcscpy(g_dataDir, L".");
+        int n = lstrlenW(g_exePath);
+
+        if (n > 0 && n < APP_PATH_CCH) {
+            memcpy(g_dataDir, g_exePath, (size_t)(n + 1) * sizeof(wchar_t));
+            slash = wcsrchr(g_dataDir, L'\\');
+            if (slash)
+                *slash = 0;
+            else
+                lstrcpyW(g_dataDir, L".");
+            ok = g_dataDir[0] && UtilEnsureDir(g_dataDir);
         }
-        ok = UtilEnsureDir(g_dataDir);
-        if (!ok)
-            return FALSE;
     }
 
-    wsprintfW(g_iniPath, L"%s\\config.ini", g_dataDir);
-    wsprintfW(g_customWavPath, L"%s\\custom.wav", g_dataDir);
-    wsprintfW(g_logPath, L"%s\\BetterCtrlCS.log", g_dataDir);
+    if (!ok)
+        return FALSE;
+
+    if (!UtilJoinPath(g_iniPath, APP_PATH_CCH, g_dataDir, L"config.ini") ||
+        !UtilJoinPath(g_customWavPath, APP_PATH_CCH, g_dataDir, L"custom.wav") ||
+        !UtilJoinPath(g_logPath, APP_PATH_CCH, g_dataDir, L"BetterCtrlCS.log"))
+        return FALSE;
+
+    if (UtilJoinPath(stale, APP_PATH_CCH, g_dataDir, L"custom.new"))
+        DeleteFileW(stale);
     return TRUE;
 }
 
@@ -114,15 +185,21 @@ BOOL UtilReadFile(const wchar_t* path, DWORD maxBytes, BYTE** data, DWORD* size)
 
 BOOL UtilWriteFileAtomic(const wchar_t* path, const void* data, DWORD size)
 {
-    wchar_t tmp[MAX_PATH + 8];
+    wchar_t tmp[APP_PATH_CCH + 8];
     HANDLE h;
     DWORD total = 0;
     int attempt;
     BOOL moved = FALSE;
+    size_t n;
 
-    if (wcslen(path) + 5 >= MAX_PATH + 8)
+    if (!path)
         return FALSE;
-    wsprintfW(tmp, L"%s.tmp", path);
+    n = wcslen(path);
+    if (n == 0 || n >= sizeof(tmp) / sizeof(tmp[0]) ||
+        n + 5 >= sizeof(tmp) / sizeof(tmp[0]))
+        return FALSE;
+    memcpy(tmp, path, n * sizeof(wchar_t));
+    memcpy(tmp + n, L".tmp", 5 * sizeof(wchar_t));
 
     h = CreateFileW(tmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
                     FILE_ATTRIBUTE_NORMAL, NULL);
@@ -272,11 +349,13 @@ BOOL UtilAutostartIsCurrent(void)
     wchar_t expected[MAX_PATH + 64];
     DWORD cb = (DWORD)sizeof(value);
 
+    if (!FormatRunCommand(expected, (int)(sizeof(expected) / sizeof(expected[0]))))
+        return FALSE;
+
     if (RegGetValueW(HKEY_CURRENT_USER, RUN_KEY, APP_ID, RRF_RT_REG_SZ, NULL,
                      value, &cb) != ERROR_SUCCESS)
         return FALSE;
 
-    wsprintfW(expected, L"\"%s\" --background", g_exePath);
     return _wcsicmp(value, expected) == 0;
 }
 
@@ -293,7 +372,10 @@ BOOL UtilAutostartSet(BOOL enable)
 
     if (enable) {
         wchar_t cmd[MAX_PATH + 64];
-        wsprintfW(cmd, L"\"%s\" --background", g_exePath);
+        if (!FormatRunCommand(cmd, (int)(sizeof(cmd) / sizeof(cmd[0])))) {
+            RegCloseKey(key);
+            return FALSE;
+        }
         r = RegSetValueExW(key, APP_ID, 0, REG_SZ, (const BYTE*)cmd,
                            (DWORD)((wcslen(cmd) + 1) * sizeof(wchar_t)));
     } else {
