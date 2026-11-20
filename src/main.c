@@ -23,6 +23,11 @@ static UINT  g_taskbarCreated;
 static BOOL  g_keyDown[256];
 static DWORD g_keyTick[256];
 
+/* A new press after this much silence. The window is measured from the
+   previous key-down event, including auto-repeat, so holding the key does
+   not fire again. It is long enough for the slowest system repeat. */
+#define KEY_REPEAT_GAP_MS 5000u
+
 static void TrayAdd(void);
 static void TrayRemove(void);
 
@@ -179,6 +184,19 @@ static void OnTrigger(UINT vk)
     }
 }
 
+static BOOL KeyIsDown(int vk)
+{
+    return (GetAsyncKeyState(vk) & 0x8000) != 0;
+}
+
+/* Drop a tracked press whose KEYUP was never delivered (secure desktop,
+   a timed-out hook) once the key is physically up. */
+static void ReconcileUp(UINT vk)
+{
+    if (vk < 256 && g_keyDown[vk] && !KeyIsDown((int)vk))
+        g_keyDown[vk] = FALSE;
+}
+
 static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam,
                                              LPARAM lParam)
 {
@@ -186,33 +204,38 @@ static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam,
         const KBDLLHOOKSTRUCT* k = (const KBDLLHOOKSTRUCT*)lParam;
         UINT vk = k->vkCode;
 
-        if (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) {
+        if ((wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) && vk < 256) {
             DWORD now = GetTickCount();
-            if (vk < 256 && (!g_keyDown[vk] || now - g_keyTick[vk] > 5000)) {
-                g_keyDown[vk] = TRUE;
-                g_keyTick[vk] = now;
+            BOOL fresh;
 
-                if (vk == 'C' || vk == 'S') {
-                    BOOL ctrl =
-                        g_keyDown[VK_CONTROL] || g_keyDown[VK_LCONTROL] ||
-                        g_keyDown[VK_RCONTROL] ||
-                        (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
-                    BOOL alt = g_keyDown[VK_MENU] || g_keyDown[VK_LMENU] ||
-                               g_keyDown[VK_RMENU] ||
-                               (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+            /* Do not reconcile the key that generated this event. Its
+               async state may not include the event yet, and clearing it
+               would turn every auto-repeat into a new press. */
+            if (vk != 'C')
+                ReconcileUp('C');
+            if (vk != 'S')
+                ReconcileUp('S');
 
-                    if (ctrl && !alt && g_config.enabled) {
-                        BOOL enabled = (vk == 'C') ? g_config.c_enabled
-                                                   : g_config.s_enabled;
-                        if (enabled) {
-                            PostMessageW(g_hwndMain, WM_APP_TRIGGER, vk, 0);
-                        }
-                    }
+            fresh = !g_keyDown[vk] ||
+                    (now - g_keyTick[vk] > KEY_REPEAT_GAP_MS);
+            g_keyDown[vk] = TRUE;
+            g_keyTick[vk] = now;
+
+            if (fresh && (vk == 'C' || vk == 'S')) {
+                BOOL ctrl = KeyIsDown(VK_CONTROL) || KeyIsDown(VK_LCONTROL) ||
+                            KeyIsDown(VK_RCONTROL);
+                BOOL alt = KeyIsDown(VK_MENU) || KeyIsDown(VK_LMENU) ||
+                           KeyIsDown(VK_RMENU);
+
+                if (ctrl && !alt && g_config.enabled) {
+                    BOOL enabled = (vk == 'C') ? g_config.c_enabled
+                                               : g_config.s_enabled;
+                    if (enabled)
+                        PostMessageW(g_hwndMain, WM_APP_TRIGGER, vk, 0);
                 }
             }
-        } else if (wParam == WM_KEYUP || wParam == WM_SYSKEYUP) {
-            if (vk < 256)
-                g_keyDown[vk] = FALSE;
+        } else if ((wParam == WM_KEYUP || wParam == WM_SYSKEYUP) && vk < 256) {
+            g_keyDown[vk] = FALSE;
         }
     }
 
@@ -349,16 +372,21 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     if (g_dpi == 0)
         g_dpi = 96;
 
+    /* CreateMutex does not clear the last error when it creates the
+       object, so a stale code would look like an existing instance. */
+    SetLastError(0);
     mutex = CreateMutexW(NULL, FALSE, mutexName);
     if (mutex && GetLastError() == ERROR_ALREADY_EXISTS) {
-        int i;
-        for (i = 0; i < 40; i++) {
-            HWND existing = FindWindowW(MAIN_CLASS, NULL);
-            if (existing) {
-                PostMessageW(existing, WM_APP_SHOWSETTINGS, 0, 0);
-                break;
+        if (!background) {
+            int i;
+            for (i = 0; i < 40; i++) {
+                HWND existing = FindWindowW(MAIN_CLASS, NULL);
+                if (existing) {
+                    PostMessageW(existing, WM_APP_SHOWSETTINGS, 0, 0);
+                    break;
+                }
+                Sleep(50);
             }
-            Sleep(50);
         }
         if (argv)
             LocalFree(argv);
